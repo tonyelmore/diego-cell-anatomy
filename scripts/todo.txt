@@ -1,7 +1,0 @@
-Tony - look into iptables for c2c when app on same diego cell
-Rehan - does diego-sshd still run when cf ssh disabled?  Yes.
-Email to Dhananjay on C2C ... pros / cons
-What is the 12:00 meeting with edward?
-Respond to email from edward about c2c and vxlan tunneling 
-Update the diagram 
-
