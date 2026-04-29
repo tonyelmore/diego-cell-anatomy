@@ -13,6 +13,12 @@ cf app <app-name> --guid
 
 This returns the GUID that Diego uses to track and manage your application instance.
 
+Then find which diego_cell is hosting the application.  You will need the instance id of the application running on that diego_cell.
+This can be done with `cfdot actual-lrps` from any diego_cell - but you will then need to ssh into the correct diego_cell.
+<<TODO: Find the right jq command to make this easier>>
+/var/vcap/data/grootfs/store/unprivileged/images/
+
+
 ### Step 2: List Container Tasks Using the Container Runtime
 
 On the Diego cell, use the containerd CLI to see running containers:
