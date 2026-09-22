@@ -10,9 +10,9 @@ different ways as you move down the stack, so it helps to fix the terms up front
 cf app name
    └─ App GUID ................... 4626fd81-…            (Cloud Controller's id for the app)
         └─ process_instance_id ... fe524340-…            (the containerd container id AND task id)
-             ├─ ctr task ls → PID .. 794035              (the container's process id → nsenter, /proc/<pid>)
+             ├─ ctr task ls → PID .. 794035              (the container's process id → nsenter, /proc/<PID>)
              │      └─ namespaces (mnt, net, pid, …)
-             └─ grootfs image ..... images/<handle>/     (the container's rootfs)
+             └─ grootfs image ..... images/<id>/         (the container's rootfs)
                     └─ base volume . volumes/<sha>/       (the STACK — cflinuxfs4 content + version)
 ```
 
@@ -43,10 +43,10 @@ in Diego — it appears as `app_id` in every actual-LRP's `metric_tags`.
 
 ---
 
-## Step 2 — Locate the Instance: which cell, which handle
+## Step 2 — Locate the Instance: which cell, which process_instance_id
 
-**Goal:** turn the app GUID into (a) the cell to SSH into and (b) the container
-handle to chase on that cell.
+**Goal:** turn the app GUID into (a) the cell to SSH into and (b) the
+process_instance_id to chase on that cell.
 
 Run from **any** cell (cfdot queries the BBS, not the local cell):
 
@@ -66,7 +66,7 @@ Process Id: fe524340-e3bb-47ac-4d50-7f2b
 **Why it matters:** the `Process Id` here is the `process_instance_id` — the
 single UUID that identifies this container everywhere downstream. It *is* the
 containerd container id and task id (you'll see it as the **TASK** in Step 4) and
-the grootfs `images/` directory name (Step 8). You must SSH into the cell it
+the grootfs `images/` directory name (Step 7). You must SSH into the cell it
 names; `/proc/<pid>/root` and `nsenter` only work against a container running on
 the cell you're on.
 
@@ -127,7 +127,7 @@ PID is the one you feed to `nsenter` and `/proc/<pid>` in the following steps.
 **Goal:** see the isolation boundaries the container is built from.
 
 ```bash
-ls -la /proc/<app-pid>/ns
+ls -la /proc/<PID>/ns
 ```
 
 **What you'll see:** links for `cgroup`, `ipc`, `mnt`, `net`, `pid`, `user`,
@@ -143,7 +143,7 @@ ls -la /proc/<app-pid>/ns
 | `user`    | UID/GID mapping between container and host |
 | `cgroup`  | The container's view of `/proc/self/cgroup` |
 
-**Why it matters:** these are the primitives; the two demos below make them
+**Why it matters:** these are the primitives; the demos below make them
 tangible.
 
 ---
@@ -156,21 +156,21 @@ tangible.
 
 ```bash
 ifconfig                              # host: physical + virtual interfaces
-nsenter -t <app-pid> -n ifconfig      # container: lo and one veth, its own IP
+nsenter -t <PID> -n ifconfig          # container: lo and one veth, its own IP
 ```
 
 **Processes** — host sees the whole cell; container sees only its own tree:
 
 ```bash
 ps ax                                 # host: all cell + app + system processes
-nsenter -t <app-pid> -p ps ax         # container: only this app's processes
+nsenter -t <PID> -p ps ax             # container: only this app's processes
 ```
 
 **Mount** — host sees the whole cell; container sees only its own filesystem:
 
 ```bash
 ls -al                                 # shows files from the host (diego_cell)
-nsenter -t <app-pid> -m /bin/bash      # container: only this app's filesystem
+nsenter -t <PID> -m /bin/bash          # container: only this app's filesystem
 ls -al                                 # shows files from the container, not the host
 ```
 
@@ -204,17 +204,47 @@ per-container writable upper/`diff` layer. Your **droplet** (the staged app) is
 extracted *inside* this filesystem under `/home/vcap`; it is content within the
 image, **not** the image itself and not a base layer.
 
-**Resolve the image to its stack volume:**
+**Resolve the image to its stack volume.** Find this container's overlay mount,
+read its lower layer (the short `l/` symlink), then resolve that to the real
+volume path:
 
 ```bash
-mount | grep <process_instance_id>                          # overlay … lowerdir=…/l/XXXX
-readlink /var/vcap/data/grootfs/store/unprivileged/l/XXXX   # -> volumes/<sha>
+mount | grep <process_instance_id> | grep lowerdir          # the overlay; lowerdir = l/xxx
+readlink /var/vcap/data/grootfs/store/unprivileged/l/xxx    # -> volumes/<sha>
 ```
 
-**Fingerprint the stack straight out of the volume** (no container, no nsenter):
+The bare `<process_instance_id>` line is the app container; the `-envoy` and
+`-liveness-healthcheck-0` lines are its sidecars' own images.
 
-<Rework the rest of section 7>
+**Read the stack off the volume.** The volume is the read-only base layer — the
+**stack** itself — so you can read it directly, with no running container and no
+`nsenter` (the same content you'd see from inside via `cf ssh`):
 
+```bash
+V=/var/vcap/data/grootfs/store/unprivileged/volumes/<sha>
+grep VERSION $V/etc/os-release                                       # Ubuntu / OS release
+cat $V/etc/stack-version                                             # the stack version
+dpkg-query --admindir=$V/var/lib/dpkg -W -f='${Package} ${Version}\n' openssl libc6
+```
+
+**The application is not on the volume.** The volume carries only the stack, so
+`ls $V/home/vcap/app` shows the stack's empty `/home/vcap`, not your droplet.
+Your app lives in the container's writable upper layer; to see its files, enter
+the container's mount namespace (Step 6), which presents the merged view — the
+droplet layered over the stack:
+
+```bash
+nsenter -t <PID> -m /bin/bash
+ls -al /home/vcap/app                  # the droplet, merged over the stack
+```
+
+**List the stack of every container on the cell** — one line per volume that
+carries a stack version:
+
+```bash
+for V in /var/vcap/data/grootfs/store/unprivileged/volumes/*; do \
+  [ -f "$V/etc/stack-version" ] && echo "$(basename "$V") $(cat "$V/etc/stack-version")"; \
+done
 ```
 
 ---
@@ -249,14 +279,14 @@ removes an orphan and reclaims its writable layer once you're sure it's dead.
 | Hop | Command | Yields |
 |-----|---------|--------|
 | app → GUID | `cf app <name> --guid` | App GUID |
-| GUID → cell + handle | `cfdot actual-lrps \| jq …` | `cell_id`, `process_instance_id` |
+| GUID → cell + id | `cfdot actual-lrps \| jq …` | `cell_id`, `process_instance_id` |
 | → cell shell | `bosh ssh diego_cell/<cell_id>` | root on the host |
-| handle → task PID | `ctr … -n garden task ls` | garden-init PID |
-| task PID → app PID | `pstree -p <task-pid>` | app PID |
-| app PID → namespaces | `ls -la /proc/<app-pid>/ns` | mnt/net/pid/… |
-| isolation demo | `nsenter -t <app-pid> -n\|-p …` | container's view |
-| handle → rootfs | `images/<handle>/` | overlay: stack + writable layer |
-| rootfs → stack | `l/` symlink → `volumes/<sha>/` | cflinuxfs4 content + version |
+| id → PID | `ctr … -n garden task ls` | the container's PID |
+| PID → namespaces | `ls -la /proc/<PID>/ns` | mnt/net/pid/… |
+| isolation demo | `nsenter -t <PID> -m\|-n\|-p …` | container's view |
+| id → rootfs | `images/<process_instance_id>/` | overlay: stack + writable layer |
+| rootfs → volume | `mount \| grep …` → `readlink l/xxx` | `volumes/<sha>` (the stack) |
+| read the stack | `cat $V/etc/stack-version` … | os-release, stack version, pkgs |
 
 ---
 
@@ -314,7 +344,7 @@ Now you can read data off the volume (the same as if you "cf ssh")
   grep VERSION $V/etc/os-release                                                        # To see the os-release version
   grep VERSION $V/etc/stack-version                                                     # To see the stack version
   cat $V/etc/stack-version                                                              # Also to see the stack version
-  dpkg-query --admindir=$V/var/lib/dpkg -W -f='$Package} ${Version}\n' openssl libc6    # To see versions of openssl and libc6
+  dpkg-query --admindir=$V/var/lib/dpkg -W -f='${Package} ${Version}\n' openssl libc6    # To see versions of openssl and libc6
   ls -al $V/home/vcap/app                                                               # To see the root directory of the application (this actually does not work, I have to nsenter to see the files)
 ```
 
