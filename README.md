@@ -14,9 +14,15 @@ cf app <app-name> --guid
 This returns the GUID that Diego uses to track and manage your application instance.
 
 Then find which diego_cell is hosting the application.  You will need the instance id of the application running on that diego_cell.
-This can be done with `cfdot actual-lrps` from any diego_cell - but you will then need to ssh into the correct diego_cell.
-<<TODO: Find the right jq command to make this easier>>
-/var/vcap/data/grootfs/store/unprivileged/images/
+This can be done with `cfdot actual-lrps` from any diego_cell - but you will then need to ssh into the correct diego_cell to continue with future steps.
+
+cfdot actual-lrps | jq -r --arg app "<<app_guid>>" \
+  'select(.metric_tags.app_id == $app) | "Diego Cell: diego_cell/\(.cell_id)\nProcess Id: \(.metric_tags.process_instance_id)"'
+  
+Now ssh into the correct diego_cell
+And you also have the process_id (this is NOT the real process id ... that comes later)
+
+In /var/vcap/data/grootfs/store/unprivileged/images/ you should see the process id ... this is the droplet (is this a true statement)?
 
 
 ### Step 2: List Container Tasks Using the Container Runtime
@@ -33,7 +39,7 @@ This command:
 - Queries the `garden` namespace where Diego containers run
 - Lists all active container tasks along with a Process ID (PID)
 
-Look for your application's container by matching the GUID.
+Look for your application's process_id as the TASK.  Then you will also see the PID.
 
 ### Step 3: Find the Application Process ID
 
